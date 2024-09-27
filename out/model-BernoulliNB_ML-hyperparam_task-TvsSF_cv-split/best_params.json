@@ -1,0 +1,7 @@
+{
+    "force_alpha": true,
+    "fit_prior": false,
+    "class_prior": null,
+    "binarize": 1.0,
+    "alpha": 10.0
+}
