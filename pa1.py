@@ -765,8 +765,8 @@ if MODE=='results':
     from itertools import product
     import numpy as np
 
-    OUTPUT_PATH = 'results-output2'
-    INPUT_PATH = 'learning-output2'
+    OUTPUT_PATH = 'results-output'
+    INPUT_PATH = 'learning-output'
     os.makedirs(OUTPUT_PATH,exist_ok=True)
 
     # Analyze preprocessing results
@@ -851,15 +851,21 @@ if MODE=='results':
         task = os.path.basename(folder).split('_')[1].split('-')[1]
         split = os.path.basename(folder).split('_')[2].split('-')[1]
         print(model,task,split)
-        aggregated_cm_test = readjson(os.path.join(folder_,'aggregated_cm_test.json'))
-        aggregated_cm_test['model']=model
-        aggregated_cm_test['task']=task
-        aggregated_cm_test['split']=split
-        aggregated_cm_test['TP']=aggregated_cm_test['cm'][1][1]
-        aggregated_cm_test['TN']=aggregated_cm_test['cm'][0][0]
-        aggregated_cm_test['FP']=aggregated_cm_test['cm'][0][1]
-        aggregated_cm_test['FN']=aggregated_cm_test['cm'][1][0]
-        instances.append(aggregated_cm_test)
+        scores=[]
+        for fold in range(11):
+            with open(os.path.join(folder_,f'model-fold-{fold}.pickle'),'rb') as f:
+                model_dict = pickle.load(f)
+            aggregated_cm_test = readjson(os.path.join(folder_,'aggregated_cm_test.json'))
+            aggregated_cm_test['model']=model
+            aggregated_cm_test['task']=task
+            aggregated_cm_test['split']=split
+            aggregated_cm_test['TP']=aggregated_cm_test['cm'][1][1]
+            aggregated_cm_test['TN']=aggregated_cm_test['cm'][0][0]
+            aggregated_cm_test['FP']=aggregated_cm_test['cm'][0][1]
+            aggregated_cm_test['FN']=aggregated_cm_test['cm'][1][0]
+            scores.append(model_dict['test_acc'])
+            aggregated_cm_test['ACC_distribution']=model_dict['test_acc']
+            instances.append(aggregated_cm_test)
         print(aggregated_cm_test)
 
     df = pd.DataFrame(instances)
@@ -873,7 +879,7 @@ if MODE=='results':
     model_labels={'LogisticRegression':'Logistic Regression','LinearSVC':'Linear SVC','BernoulliNB':'Bernoulli NB'}
 
     g = sns.catplot(
-        data=df, x="task", y="ACC", hue="model",
+        data=df, x="task", y='ACC_distribution', hue="model",
         capsize=.2, palette="YlGnBu_d", errorbar="se",
         kind="point", height=6, aspect=1,order=task_vector,hue_order=model_vector)
     g.despine(left=True)
@@ -901,6 +907,8 @@ if MODE=='results':
         -------
         list
             a sorted list of (word, log prob) sorted by log probability in descending order.
+
+        From: https://stackoverflow.com/questions/50526898/how-to-get-feature-importance-in-naive-bayes
         """
 
         words = vect.get_feature_names_out()
@@ -963,30 +971,3 @@ if MODE=='results':
     df_features_ = df_features.pivot(index='task',columns='model',values='features_unique')
     df_features_.to_csv(os.path.join(OUTPUT_PATH,'features_table_dict.csv'))
     df_features_.map(lambda x: ', '.join(x.keys())).to_csv(os.path.join(OUTPUT_PATH,'features_table_list.csv'))
-    """ 
-    clf = LogisticRegression(random_state=0).fit(X_train, y_train)
-    y_pred = clf.predict(X_test)
-    accuracy_score(y_test, y_pred)
-
-
-    confusion_matrix(y_test, y_pred)
-
-    # feature importance
-    # plot the top 10 features and their coefficients
-
-
-    def plot_coefficients(classifier, feature_names, top_features=10):
-        coef = classifier.coef_.ravel()
-        top_positive_coefficients = np.argsort(coef)[-top_features:]
-        top_negative_coefficients = np.argsort(coef)[:top_features]
-        top_coefficients = np.hstack([top_negative_coefficients, top_positive_coefficients])
-        # create plot
-        plt.figure(figsize=(15, 5))
-        colors = ['red' if c < 0 else 'blue' for c in coef[top_coefficients]]
-        plt.bar(np.arange(2 * top_features), coef[top_coefficients], color=colors)
-        feature_names = np.array(feature_names)
-        plt.xticks(np.arange(1, 1 + 2 * top_features), feature_names[top_coefficients], rotation=60, ha='right')
-        plt.show()
-
-    plot_coefficients(clf, np.array(gram_vectorizer.get_feature_names_out()))
-    """
