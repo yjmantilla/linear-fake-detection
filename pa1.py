@@ -951,7 +951,7 @@ if MODE=='results':
                         negative=[x[0] for x in get_salient_words(clf,vectorizer,0)[:10]]
                         positive=[x[0] for x in get_salient_words(clf,vectorizer,1)[:10]]
                         # obtain the top 10 features for the negative class that are not in the top 10 features for the positive class
-                        top_features.extend([x for x in negative if x not in positive])
+                        top_features.extend([x for x in negative if x not in positive])#+[x for x in positive if x not in negative])
                         #top_features.extend([x[0] for x in get_salient_words(clf,vectorizer,1)[:10]])
             features_dict['features']=top_features
             features_dicts.append(features_dict)
