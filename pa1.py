@@ -1,4 +1,4 @@
-MODE = 'learn'
+MODE = 'results'
 
 
 ## Logging and utility functions
@@ -10,8 +10,14 @@ import pickle
 import psutil
 import os
 import copy
+
+
 NJOBS = psutil.cpu_count(logical=False)
 
+def readjson(file):
+    with open(file) as f:
+        data = json.load(f)
+    return data
 
 def savejson(data,out):
     with open(out, 'w') as outfile:
@@ -248,17 +254,17 @@ if MODE=='learn':
     from sklearn.model_selection import GridSearchCV
     from sklearn.model_selection import RandomizedSearchCV
     from sklearn.pipeline import Pipeline
-    from sklearn.model_selection import StratifiedGroupKFold
+    from sklearn.model_selection import StratifiedGroupKFold, GroupKFold
     from sklearn import tree
     from sklearn.svm import SVC
     from sklearn.ensemble import GradientBoostingClassifier
     from sklearn.linear_model import LogisticRegression
     from sklearn.naive_bayes import BernoulliNB
     from sklearn.svm import LinearSVC
-    from itertools import product
     
 
     OUTPUT_PATH = 'learning-output'
+    os.makedirs(OUTPUT_PATH,exist_ok=True)
 
     # Get the list of cities we have ground truth for
     cities = glob.glob(f'./generated-facts/generated-facts-**-**.txt')
@@ -420,10 +426,11 @@ if MODE=='learn':
         return sentence
 
     # Models we will test
+    # I define a dictionary so that I can iterate over the models and their hyperparameters
 
     CLASS_WEIGHT={0:1,1:1} # we will use this class weight for the models
-    model_zoo= {
-        'LogisticRegression':{
+    model_zoo= {}
+    model_zoo['LogisticRegression']={
             'init':dict(penalty='l2',
             dual=False,
             tol=0.0001,
@@ -434,14 +441,14 @@ if MODE=='learn':
             random_state=0,
             solver='lbfgs',
             max_iter=300,
-            #multi_class='auto',
+            #multi_class='auto', # this is the default, and is deprecated
             verbose=0,
             warm_start=False,
             n_jobs=1,
             l1_ratio=None),
             'foo':LogisticRegression,
-            },
-        'LinearSVC':{
+            }
+    model_zoo['LinearSVC']={
             'init':dict(
                 penalty='l2',
                 loss='squared_hinge',
@@ -456,8 +463,8 @@ if MODE=='learn':
                 random_state=42,
                 max_iter=1000),
             'foo':LinearSVC
-        },
-        'BernoulliNB':{
+        }
+    model_zoo['BernoulliNB']={
             'init':dict(
             alpha=1.0, 
             force_alpha=True,
@@ -467,17 +474,17 @@ if MODE=='learn':
         ),
         'foo':BernoulliNB
         }
-    }
 
-    ## Vectorizers we will test
-
+    def buffer(x):
+        return x
+    ## Vectorizer to be used
     tfidf_vec_params = dict(input='content',
                     encoding='utf-8',
                     decode_error='strict',
                     strip_accents=None, # already done
                     lowercase=False, # already done
-                    preprocessor=lambda x:x, # already done
-                    tokenizer=lambda x: x, # already done
+                    preprocessor=buffer, # already done
+                    tokenizer=buffer, # already done
                     analyzer='word',
                     stop_words=None, # already done
                     token_pattern=None, # already done
@@ -492,112 +499,73 @@ if MODE=='learn':
                     smooth_idf=True, # this helps with zero division
                     sublinear_tf=False) # use log normalization
 
+    ## Function to run the backbone of the preprocessing over a list of sentences
     def prep_sentences(list_of_sentences, final_step='lemmatization'):
         return [prep_sentence(sentence, final_step) for sentence in list_of_sentences]
 
-    pipeline = Pipeline([
-        ('prep', FunctionTransformer(prep_sentences, validate=False, kw_args={'final_step':'lemmatization'})),
-        ('vectorizer', TfidfVectorizer(**tfidf_vec_params)),
-        ('clf', copy.deepcopy(model_zoo['LogisticRegression']['foo'](**model_zoo['LogisticRegression']['init'])))])
+    ## Preprocessing tuning for the pipeline using df_others
 
-    prep_param_grid = {'prep__kw_args':[{'final_step':'lemmatization'},{'final_step':'stemming'}], 
-            'vectorizer__use_idf':[True,False],
-            'vectorizer__norm':['l1', 'l2', None],
-            }
-
+    # Encoding the labels from boolean to 1 and 0
     df_others['label']=df_others['veracity'].apply(lambda x: 1 if x=='facts' else 0)
-    df_others['fact-prep'] = df_others['fact'].apply(prep_sentence) # inspect the preprocessing but X is the original fact
 
-    X = df_others['fact'].to_list()
-    y = df_others['label'].to_list()
+    # Splitting the holdout data (df_others, that came from other students) into two sets
+    # 1 set will be used to experiment on the preprocessing (X_prep,y_prep)
+    # the other set will be used to experiment on the hyperparameters (X_hyper,y_hyper)
 
-    # Perform grid search
-    grid_search = GridSearchCV(pipeline, prep_param_grid, cv=5, n_jobs=NJOBS, verbose=3, refit=True) # cv= 5 fold stratified non-shuffled kfold
-    grid_search.fit(X, y)
+    X_others = df_others['fact'].to_list()
+    y_others = df_others['label'].to_list()
 
-    best_params = grid_search.best_params_
-    best_score = grid_search.best_score_
+    X_prep,X_hyper,y_prep,y_hyper = train_test_split(X_others, y_others, test_size=0.5, shuffle=True, random_state=42, stratify=y_others)
 
-    ## Hyperparameter tuning for the pipeline using df_others
+    if not os.path.exists(os.path.join(OUTPUT_PATH,'best_preps.pickle')):
+        best_preps={}
+        for model in model_zoo.keys():
+            pipeline = Pipeline([
+            ('prep', FunctionTransformer(prep_sentences, validate=False, kw_args={'final_step':'lemmatization'})),
+            ('vectorizer', TfidfVectorizer(**tfidf_vec_params)),
+            ('clf', model_zoo[model]['foo'](**model_zoo[model]['init']))])
 
-    ## Encoding to vector space
-    count_vec_params = dict(input='content',
-                            encoding='utf-8',
-                            decode_error='strict',
-                            ngram_range = (1, 1), # unigrams, test bigrams?
-                            strip_accents = None, # already done
-                            lowercase = False, # already done
-                            preprocessor = None, # already done
-                            stop_words = None, # already done
-                            tokenizer = lambda x: x, # already done
-                            token_pattern=None, # already done
-                            analyzer = 'word', # already done
-                            max_df = 1., # keep all
-                            min_df = 0., # keep all
-                            vocabulary=None, # to be fit
-                            binary = False, # TODO:hmmm... to be decided
-                            dtype=np.int64,
-                            max_features=100, # hmmm... to be decided or hyperparameter to be tuned?)
-                            )
+            prep_param_grid = {'prep__kw_args':[{'final_step':'lemmatization'},{'final_step':'stemming'}], 
+                    'vectorizer__use_idf':[True,False],
+                    'vectorizer__norm':['l1', 'l2', None],
+                    }
 
-    tfidf_no_idf_vec = TfidfVectorizer(use_idf=False)
-    tfidf_no_norm_vec = TfidfVectorizer(use_idf=False, norm=None)
+            # Perform grid search
+            grid_search = GridSearchCV(pipeline, prep_param_grid, cv=5, n_jobs=NJOBS, verbose=3, refit=True) # cv= 5 fold stratified non-shuffled kfold
+            grid_search.fit(X_prep, y_prep)
 
-    gram_vectorizerH = TfidfVectorizer(**tfidf_vec_params) #CountVectorizer(**count_vec_params)
+            best_params = grid_search.best_params_
+            best_score = grid_search.best_score_
 
+            y_pred = grid_search.best_estimator_.predict(X_hyper)
+            acc = accuracy_score(y_hyper, y_pred)
 
+            best_preps[model] = {'best_score':best_score,'best_params':best_params, 'holdout_score':acc,'grid_search':grid_search}
+            print(best_preps)
 
+        for model in best_preps.keys():
+            print(model,best_preps[model]['best_params'],best_preps[model]['best_score'],best_preps[model]['holdout_score'])
+        
+        save_dict(os.path.join(OUTPUT_PATH,'best_preps.pickle'),best_preps)
+    else:
+        best_preps = pickle.load(open(os.path.join(OUTPUT_PATH,'best_preps.pickle'),'rb'))
 
+    ## Hyperparameter tuning for the pipeline using X_hyper,y_hyper that came from other students (df_others)
 
-    ih_train, ih_test, _, _ = train_test_split(df_others.index, df_others.index, test_size=0.33, shuffle=True, random_state=42, stratify=df_others['label'])
-
-
-    Xh_train = gram_vectorizerH.fit_transform(df_others['fact-prep'].iloc[ih_train])
-    Xh_test = gram_vectorizerH.transform(df_others['fact-prep'].iloc[ih_test])
-    yh_train = df_others['label'].iloc[ih_train]
-    yh_test = df_others['label'].iloc[ih_test]
-
-    gram_vectorizerH.vocabulary_
-
-    
-
-
-
-
-
+    # Parameters to be explored
 
     class_weigths=[1] # vary class weight of True class if you want
 
-    ## hyperparameter selection
+    # as before, i use dictionaries to iterate over the models
     param_grid = {}
     param_grid['LogisticRegression'] = {
                 'penalty': ['l2','l1']
-                ,'C': [0.001,0.01, 0.1, 1]#, 10, 100]
-                ,'fit_intercept': [True]#,False]
+                ,'C': [0.001,0.01, 0.1, 1,10, 100]
+                ,'fit_intercept': [True,False]
                 ,'solver': ['saga']
                 ,'class_weight': [{0: 1, 1: X} for X in class_weigths]
-                ,'tol': [1e-3,1e-2],#1e-4, 
+                ,'tol': [1e-3,1e-2],
                 }
-
-    param_grid['DecisionTree'] = {
-        'criterion': ['gini']#, 'entropy']
-        ,'splitter': ['best']#,'random']
-        ,'max_depth': [5,10, 20, 30]#, 40, 50]
-        ,'min_samples_split': [2,5, 10]
-        ,'min_samples_leaf': [1, 2, 4]
-        ,'ccp_alpha': [0.0,0.001, 0.01, 0.1]
-        ,'class_weight': [{0: 1, 1: X} for X in class_weigths]
-    }
-
-    param_grid['SVM'] = {
-        'C': [0.1, 1, 10, 100],
-        'kernel': ['linear', 'poly', 'rbf', 'sigmoid'],
-        'degree': [2, 3, 4],
-        'gamma': ['scale', 'auto'],
-        'shrinking': [True, False],
-        'tol': [1e-3, 1e-2],
-        'class_weight':[{0: 1, 1: X} for X in class_weigths],
-    }
 
     param_grid['LinearSVC'] = dict(
         penalty=['l2','l1'],
@@ -622,163 +590,380 @@ if MODE=='learn':
             'class_prior' : [None]
     }
 
-    DO_MODEL = ['LogisticRegression','LinearSVC','BernoulliNB']#,'DecisionTree']#['LogisticRegression']#,'DecisionTree','SVM']#['LogisticRegression']#,[['LogisticRegression','xGB','DecisionTree','SVMln']]]#[['SVM','xGB','DecisionTree','SVMln']]#[['xGB','SVM','SVMln','DecisionTree'],['LogisticRegression','xGB','SVM','DecisionTree'],['SVMln','DecisionTree','LogisticRegression','xGB']]#,['LogisticRegression','DecisionTree','SVM']]
-    # delete the others
-    delete_models = [x for x in model_zoo.keys() if x not in DO_MODEL]
-    for dm in delete_models:
-        del model_zoo[dm]
+    # We will use the best preprocessing for each model to tune the hyperparameters
 
-    def foo_FPR(y_true,y_pred):
-        tn, fp, fn, tp  = confusion_matrix(y_true, y_pred,normalize=None,labels=[0,1]).ravel()
+    if not os.path.exists(os.path.join(OUTPUT_PATH,'best_hyper.pickle')):
+        best_hyper={}
+
+        for model in best_preps.keys():
+            best_params = best_preps[model]['best_params']
+            tfidf_best_params = {k.replace('vectorizer__',''):v for k,v in best_params.items() if 'vectorizer' in k}
+            tfidf_vec_params_hyper = copy.deepcopy(tfidf_vec_params)
+            tfidf_vec_params_hyper.update(tfidf_best_params)
+
+            pipeline = Pipeline([
+            ('prep', FunctionTransformer(prep_sentences, validate=False, kw_args=best_params['prep__kw_args'])),
+            ('vectorizer', TfidfVectorizer(**tfidf_vec_params_hyper)),
+            ('clf', model_zoo[model]['foo'](**model_zoo[model]['init']))])
+
+            # to avoid data leakage we will split X_hyper,y_hyper into train and test (instead of using X_prep,y_prep)
+
+            X_htrain, X_htest, y_htrain, y_htest = train_test_split(X_hyper, y_hyper, test_size=0.33, shuffle=True, random_state=42, stratify=y_hyper)
+
+            this_grid = copy.deepcopy(param_grid[model])
+            this_grid={'clf__'+k:v for k,v in this_grid.items()}
+            # Perform grid search
+            grid_search = GridSearchCV(pipeline,this_grid , cv=5, n_jobs=NJOBS, verbose=3, refit=True) # cv= 5 fold stratified non-shuffled kfold
+            grid_search.fit(X_htrain, y_htrain)
+
+            best_params = grid_search.best_params_
+            best_score = grid_search.best_score_
+
+            y_pred = grid_search.best_estimator_.predict(X_htest)
+            acc = accuracy_score(y_htest, y_pred)
+
+            best_hyper[model] = {'best_score':best_score,'best_params':best_params, 'holdout_score':acc,'grid_search':grid_search}
+            print(best_hyper)
+
+
+        for model in best_hyper.keys():
+            print(model,best_hyper[model]['best_params'],best_hyper[model]['best_score'],best_hyper[model]['holdout_score'])
+        
+        save_dict(os.path.join(OUTPUT_PATH,'best_hyper.pickle'),best_hyper)
+    else:
+        best_hyper = pickle.load(open(os.path.join(OUTPUT_PATH,'best_hyper.pickle'),'rb'))
+
+    ## Final training and testing of the models
+    # We will use the best preprocessing and hyperparameters for each model to train and test the models
+    # And we will use the df_learn to train and test the models
+
+    # Defining some quantities from the confusion matrix
+    def foo_FPR(cm):
+        tn, fp, fn, tp  = cm
         return 100*fp/(fp+tn) if (fp+tn) != 0 else 0
 
-    def foo_PPV(y_true,y_pred):
-        tn, fp, fn, tp  = confusion_matrix(y_true, y_pred,normalize=None,labels=[0,1]).ravel()
+    def foo_PPV(cm):
+        tn, fp, fn, tp  = cm
         return 100*tp/(tp+fp) if (tp+fp) != 0 else 0
 
-    def foo_FNR(y_true,y_pred):
-        tn, fp, fn, tp  = confusion_matrix(y_true, y_pred,normalize=None,labels=[0,1]).ravel()
+    def foo_FNR(cm):
+        tn, fp, fn, tp  = cm
         return 100*fn/(fn+tp) if (fn+tp) != 0 else 0
 
-    def foo_numTrue(y_true,y_pred):
-        tn, fp, fn, tp  = confusion_matrix(y_true, y_pred,normalize=None,labels=[0,1]).ravel()
-        return 100*(tp+fp)/(tn+fn+fp+fn)
+    def foo_NPV(cm):
+        tn, fp, fn, tp  = cm
+        return 100*tn/(tn+fn) if (tn+fn) != 0 else 0
+    
+    def foo_TPR(cm):
+        tn, fp, fn, tp  = cm
+        return 100*tp/(tp+fn) if (tp+fn) != 0 else 0
+    
+    def foo_TNR(cm):
+        tn, fp, fn, tp  = cm
+        return 100*tn/(tn+fp) if (tn+fp) != 0 else 0
 
+    def foo_ACC(cm):
+        tn, fp, fn, tp  = cm
+        return 100*(tp+tn)/(tp+tn+fp+fn) if (tp+tn+fp+fn) != 0 else 0
 
-    def confusion_matrix_scorer(clf, X, y):
-        y_pred = clf.predict(X)
-        # foo_FNR(y, y_pred)
-        # foo_FPR(y, y_pred)
-        # foo_PPV(y, y_pred)#*int(foo_numTrue(y, y_pred)>0)
-        
-        return {'PPV': foo_PPV(y, y_pred)}
+    def get_metrics(cm):
+        return {'FPR':foo_FPR(cm),'PPV':foo_PPV(cm),'FNR':foo_FNR(cm),'NPV':foo_NPV(cm),'TPR':foo_TPR(cm),'TNR':foo_TNR(cm),'ACC':foo_ACC(cm)}
 
+    # We will test different veracities
+    # TvsSF: True vs Subtly Fake
+    # TvsOF: True vs Obviously Fake
+    # GTvsSF: Grounded Truth vs Subtly Fake
+    # GTvsOF: Grounded Truth vs Obviously Fake
 
-    groups_ = df_learn['city']
-    groups_v = df_others['city'].iloc[ih_train]
+    task_dict = { # notice position 0 is the positive class and position 1 is the negative class
+        'TvsSF' :['true','subtly fake'],
+        'TvsOF' :['true','obviously fake'],
+        'GTvsSF':['grounded truth','subtly fake'],
+        'GTvsOF':['grounded truth','obviously fake']}
+    # We will also test different split strategies
+    # 1. Split by city (StratifiedGroupKFold)
+    # 2. Normal Test-Train split stratified by veracity
 
     for city in df_learn['city'].unique():
         print(city)
         print(df_learn[df_learn['city']==city]['veracity'].value_counts())
 
-    sgkf = StratifiedGroupKFold(n_splits=len(np.unique(groups_)), random_state=0, shuffle=True)
-    sgkf_v = StratifiedGroupKFold(n_splits=len(np.unique(groups_v)), random_state=0, shuffle=True)
-    X_v = Xh_train
-    y_v = yh_train
+    for task in task_dict.keys():
 
-    for mod in model_zoo.keys():
-        model_root = os.path.join(OUTPUT_PATH,f"model-{mod}_ML-{'hyperparam'}_task-{'TvsF'}_cv-{'split'}")#f"")
-        os.makedirs(model_root,exist_ok=True)
-        params=deepcopy(model_zoo[mod])
-        print('HYPERPARAM')
-        print(set(groups_v))
-        if not mod in ['LogisticRegression']:
-            grid_search = RandomizedSearchCV(params['foo'](**params['init']), param_grid[mod],n_iter=100, random_state=0,cv=sgkf_v.split(X_v, y_v, groups_v), scoring=confusion_matrix_scorer, verbose=3, n_jobs=internal_njobs,refit='PPV')
+        for split_type in ['gkf']:
+
+            classes=task_dict[task]
+            this_df=df_learn[df_learn['veracity'].isin(classes)]
+            this_df['label']=this_df['veracity'].apply(lambda x: 1 if x==classes[0] else 0)
+            groups = this_df['city']
+            gkf = GroupKFold(n_splits=len(np.unique(groups)))
+
+            for model in model_zoo.keys():
+
+
+                model_root = os.path.join(OUTPUT_PATH,f"model-{model}_task-{task}_split-{split_type}")
+                os.makedirs(model_root,exist_ok=True)
+
+                best_prep = best_preps[model]['best_params']
+                best_h = {k.replace('clf__',''):v for k,v in best_hyper[model]['best_params'].items() if 'clf' in k}
+                tfidf_best_params = {k.replace('vectorizer__',''):v for k,v in best_prep.items() if 'vectorizer' in k}
+                tfidf_vec_params_final = copy.deepcopy(tfidf_vec_params)
+                tfidf_vec_params_final.update(tfidf_best_params)
+                clf_params = model_zoo[model]['init']
+                clf_params.update(best_h)
+
+                pipeline = Pipeline([
+                ('prep', FunctionTransformer(prep_sentences, validate=False, kw_args=best_prep['prep__kw_args'])),
+                ('vectorizer', TfidfVectorizer(**tfidf_vec_params_final)),
+                ('clf', model_zoo[model]['foo'](**clf_params))])
+
+
+                if split_type == 'gkf':
+                    
+                    if not os.path.exists(os.path.join(model_root,'aggregated_cm_test.json')):
+
+                        aggregated_cm_test = np.zeros((2,2))
+                        for i, (train_index, test_index) in enumerate(gkf.split(this_df.index, this_df.index, this_df['city'])):
+                            print(f"Fold {i}:")
+                            #print(f"  Train: index={train_index}")
+                            print(f"  Train: group={set(this_df['city'].iloc[train_index])}")
+                            #print(f"  Test:  index={test_index}")
+                            print(f"  Test:  group={set(this_df['city'].iloc[test_index])}")
+
+                            pipeline.fit(this_df['fact'].iloc[train_index], this_df['label'].iloc[train_index]) #Training the model
+
+                            # Evaluate the model
+                            test_acc = accuracy_score(this_df['label'].iloc[test_index], pipeline.predict(this_df['fact'].iloc[test_index]))
+                            train_acc = accuracy_score(this_df['label'].iloc[train_index], pipeline.predict(this_df['fact'].iloc[train_index]))
+                            
+                            # Confusion matrix
+                            cm_test =  confusion_matrix(this_df['label'].iloc[test_index],  pipeline.predict(this_df['fact'].iloc[test_index]), normalize=None,labels=[0,1])
+                            cm_train = confusion_matrix(this_df['label'].iloc[train_index], pipeline.predict(this_df['fact'].iloc[train_index]),normalize=None,labels=[0,1])
+
+                            model_dict = {'model':model,'pipeline':pipeline,'task':task,'split_type':split_type,'fold':i,'test_acc':test_acc,'train_acc':train_acc,'cm_test':cm_test,'cm_train':cm_train}
+                            # Save the model
+                            fold_path=os.path.join(model_root,f'model-fold-{i}.pickle')
+                            save_dict(fold_path,model_dict)
+                            print(fold_path)
+                            print('Train:',get_metrics(cm_train.ravel()))
+                            print('Test:',get_metrics(cm_test.ravel()))
+
+                            aggregated_cm_test+=cm_test
+
+                        # Calculate the aggregated confusion matrix
+                        final_metrics=get_metrics(aggregated_cm_test.astype(int).ravel())
+                        final_metrics['cm']=aggregated_cm_test.astype(int).tolist()
+                        print('Aggregated Test:',final_metrics)
+                        save_dict(os.path.join(model_root,'aggregated_cm_test.json'),final_metrics,mode='json')
+                    else:
+                        print(os.path.join(model_root,'aggregated_cm_test.json'),'already exists')
+if MODE=='results':
+
+    import pandas as pd
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+    from itertools import product
+    import numpy as np
+
+    OUTPUT_PATH = 'results-output2'
+    INPUT_PATH = 'learning-output2'
+    os.makedirs(OUTPUT_PATH,exist_ok=True)
+
+    # Analyze preprocessing results
+
+    # These definitions are just to avoid pickling problems
+    prep_sentences = lambda x:x
+    buffer = lambda x:x
+    best_preps = pickle.load(open(os.path.join(INPUT_PATH,'best_preps.pickle'),'rb'))
+
+    best_preps.keys()
+    cvs=[]
+    for this_model in best_preps.keys():
+        this_model_best_prep = best_preps[this_model]
+        this_model_grid = this_model_best_prep['grid_search']
+        this_df = pd.DataFrame(this_model_grid.cv_results_)
+        this_df['model']=this_model
+        cvs.append(this_df)
+    df=pd.concat(cvs,ignore_index=True)
+    df.columns
+    df['param_prep__kw_args'] = df['param_prep__kw_args'].apply(lambda x: x['final_step'][:4])
+    df['param_vectorizer__use_idf'] = df['param_vectorizer__use_idf'].apply(lambda x: 'IDF' if x else 'No IDF')
+    df['param_vectorizer__norm'] = df['param_vectorizer__norm'].apply(lambda x: 'Norm '+x if x else 'No Norm')
+
+    # boxplot of the results accuracy by preprocessing
+    param_title = {
+        'param_prep__kw_args':'Word Normalization',
+        'param_vectorizer__use_idf':'IDF ',
+        'param_vectorizer__norm':'Norm '
+    }
+
+    fig, axes = plt.subplots(3, 3, figsize=(6, 6)) 
+    combs=list(product(best_preps.keys(),param_title.keys()))
+    for iax, comb in zip(enumerate(axes.flatten()), combs):
+        i,ax=iax
+        model, param = comb
+        param_name = param_title[param]
+        this_df = df[df['model']==model][['mean_test_score',param]]
+        sns.boxplot(data=this_df, x=param, y='mean_test_score', ax=ax,)
+        ax.set_xticklabels(ax.get_xticklabels() ,rotation=45)
+        if i in [0,1,2]:
+            ax.set_title(param_name)
         else:
-            grid_search = GridSearchCV(params['foo'](**params['init']), param_grid[mod],cv=sgkf_v.split(X_v, y_v, groups_v), scoring=confusion_matrix_scorer, verbose=3, n_jobs=internal_njobs,refit='PPV')
-        grid_search.fit(X_v, y_v)
-        hyperdf=pd.DataFrame(grid_search.cv_results_)
-        hyperdf.to_csv(os.path.join(model_root,f'hyperparams.csv'))
-        # Get best parameters and best score
-        best_params = grid_search.best_params_
-        best_score = grid_search.best_score_
+            ax.set_title('')
+        ax.set_xlabel('')
+        if i in [0,3,6]:
+            ax.set_ylabel(f'{model}\nMean Test Score')
+        else:
+            ax.set_ylabel('')
+    plt.tight_layout()
+    fig.savefig(os.path.join(OUTPUT_PATH,'preprocessing_results_boxplot.pdf'))
 
-        print(f"Best Parameters: {best_params}")
-        print(f"Best Score: {best_score}")
-        params['init'].update(best_params)
-        #save_dict(os.path.join(model_root,f'grid_search.pickle'),dict(grid_search=grid_search)) # cannot pickle a generator
-        save_dict(os.path.join(model_root,f'best_params.pickle'),best_params)
-        try:
-            save_dict(os.path.join(model_root,f'best_score.json'),best_score,mode='json')
-            save_dict(os.path.join(model_root,f'best_params.json'),best_params,mode='json')
-        except:
-            pass
-        model_ = Pipeline([
-                #('scale', StandardScaler()),
-                #('selection',SelectKBest(k=10)),
-                #('selection',SelectFwe()),
-                #('clf',GradientBoostingClassifier())]) 
-                # ('clf',LogisticRegression())])
-                ('clf',params['foo'](**params['init']))])
-        
 
-        models=[]
-        train_accs={}
-        cmtrain_persub={}
-        cmtest_persub={}
-        Y_test_ans=[]
-        Y_test_preds=[]
-        Y_test_subs=[]
-        Y_test_spaces=[]
-        X_test=[]
-        for task in ['TvsSF','TvsOF','GTvsSF','GTvsOF']:
+    best_preps = pickle.load(open(os.path.join(INPUT_PATH,'best_preps.pickle'),'rb'))
+    best_prep_dict = {}
+    for model in best_preps.keys():
+        best_prep_dict[model]={}
+        best_prep_dict[model]['best_params'] = best_preps[model]['best_params']
 
-            veracity_set=['true','subtly fake'] if task == 'TvsSF' else ['true','obviously fake'] if task == 'TvsOF' else ['grounded truth','subtly fake'] if task == 'GTvsSF' else ['grounded truth','obviously fake']
-            thisdf = df_learn[df_learn['veracity'].isin(veracity_set)]
-            model_root = os.path.join(OUTPUT_PATH,f"model-{mod}_ML-{'hyperparam'}_task-{task}_cv-{'split'}")
-            for i, (train_index, test_index) in enumerate(sgkf.split(df_learn.index, df_learn.index, df_learn['city'])):
-                print(f"Fold {i}:")
-                #print(f"  Train: index={train_index}")
-                print(f"  Train: group={set(groups_[train_index])}")
-                #print(f"  Test:  index={test_index}")
-                print(f"  Test:  group={set(groups_[test_index])}")
-                model = copy.deepcopy(model_)
-                #Train the model
-                X_ = gram_vectorizerH.transform(df_learn['fact-prep'].iloc[train_index])
-                y_ = df_learn['veracity'].apply() .iloc[train_index]
-                model.fit(X_.iloc[train_index], y_[train_index]) #Training the model
-                yy_true = y_[train_index]
-                yy_pred = model.predict(X_.iloc[train_index])
-                yyy_true = y_[test_index]
-                yyy_pred = model.predict(X_.iloc[test_index])
-                Y_test_ans+=yyy_true.tolist()
-                Y_test_preds+=yyy_pred.tolist()
-                Y_test_subs+=groups_[test_index].tolist()
-                Y_test_spaces+=spaces_[test_index].tolist()
-                X_test+=X_.iloc[test_index].to_numpy().tolist()
+    save_dict(os.path.join(OUTPUT_PATH,'best_preps_per_model.json'),best_prep_dict,mode='json')
 
-                trainscore = ACCURACY_FOO(yy_true, yy_pred)
-                testscore =  ACCURACY_FOO(yyy_true, yyy_pred)
-                trainFPR = foo_FPR(yy_true, yy_pred)
-                testFPR =  foo_FPR(yyy_true, yyy_pred)
-                trainPPV = foo_PPV(yy_true, yy_pred)
-                testPPV=  foo_PPV(yyy_true, yyy_pred)
-                trainFNR = foo_FNR(yy_true, yy_pred)
-                testFNR =  foo_FNR(yyy_true, yyy_pred)
+    # Do the same for hyperparameters
+    best_hyper = pickle.load(open(os.path.join(INPUT_PATH,'best_hyper.pickle'),'rb'))
 
-                traincm  = confusion_matrix(yy_true, yy_pred,normalize=None,labels=[0,1])
-                testcm  = confusion_matrix(yyy_true, yyy_pred,normalize=None,labels=[0,1])
-                subcurr=list(set(groups_[test_index]))
-                subcurr.sort()
-                sub = ','.join(subcurr)
-                cmtrain_persub[sub]={}
-                cmtest_persub[sub]={}
-                # No run merge here
-                cmtrain_persub[sub]['TN'],cmtrain_persub[sub]['FP'],cmtrain_persub[sub]['FN'],cmtrain_persub[sub]['TP']=tuple(traincm.flatten().tolist())
-                cmtest_persub[sub]['TN'],cmtest_persub[sub]['FP'],cmtest_persub[sub]['FN'],cmtest_persub[sub]['TP']=tuple(testcm.flatten().tolist())
+    best_hyper_dict = {}
+    for model in best_hyper.keys():
+        best_hyper_dict[model]={}
+        best_hyper_dict[model]['best_params'] = best_hyper[model]['best_params']
+    
+    save_dict(os.path.join(OUTPUT_PATH,'best_hyper_per_model.json'),best_hyper_dict,mode='json')
 
-                print(f"Accuracy for the fold no. {i} on the train set: BACC {trainscore} FPR {trainFPR} PPV {trainPPV}")
-                i += 1
-                models.append((model,trainscore,testscore,trainFPR,testFPR,trainPPV,testPPV,trainFNR,testFNR,set(groups_[test_index])))
-                ### Train Accuracies per set inside the train set.
-                fold_str=".".join(list(set(groups_[test_index])))
-                train_accs[fold_str]={}
-                for gg in set(groups_[train_index]):
-                    idxs = np.where(groups_[train_index]==gg)[0]
-                    trainsubbacc =ACCURACY_FOO(y_[train_index][idxs], model.predict(X_.iloc[train_index].iloc[idxs]))
-                    trainsubfpr =foo_FPR(y_[train_index][idxs], model.predict(X_.iloc[train_index].iloc[idxs]))
-                    trainsubppv =foo_PPV(y_[train_index][idxs], model.predict(X_.iloc[train_index].iloc[idxs]))
-                    trainsubfnr =foo_FNR(y_[train_index][idxs], model.predict(X_.iloc[train_index].iloc[idxs]))
-                    print(f"Accuracy for {gg} on the train set: BACC {trainsubbacc} FPR {trainsubfpr} PPV {trainsubppv} FNR {trainsubfnr}")
-                    train_accs[fold_str][gg]={"score":trainsubbacc,"fpr":trainsubfpr,"ppv":trainsubppv,'fnr':trainsubfnr,"n":len(idxs),"percentage":len(idxs)/len(train_index),"total":len(train_index),"fold":i}
+    ## Analyze tasks results
 
-                print(f"Accuracy for the fold no. {i} on the test set: BACC {testscore} FPR {testFPR} PPV {testPPV} FNR {testFNR}")
+    instance_pattern = 'model-%model%_task-%task%_split-%split%'
+    folder_pattern = os.path.join(INPUT_PATH,instance_pattern).replace('%model%','*').replace('%task%','*').replace('%split%','*')
+    folders=glob.glob(folder_pattern)
 
-            savejson(train_accs,os.path.join(model_root,f"trainaccuracies.json"))
-            savejson(cmtrain_persub,os.path.join(model_root,f"cmtrain.json"))
-            savejson(cmtest_persub,os.path.join(model_root,f"cmtest.json"))
+    instances=[]
+    for folder_ in folders:
+        folder=os.path.basename(folder_)
+        print(folder)
+        model = os.path.basename(folder).split('_')[0].split('-')[1]
+        task = os.path.basename(folder).split('_')[1].split('-')[1]
+        split = os.path.basename(folder).split('_')[2].split('-')[1]
+        print(model,task,split)
+        aggregated_cm_test = readjson(os.path.join(folder_,'aggregated_cm_test.json'))
+        aggregated_cm_test['model']=model
+        aggregated_cm_test['task']=task
+        aggregated_cm_test['split']=split
+        aggregated_cm_test['TP']=aggregated_cm_test['cm'][1][1]
+        aggregated_cm_test['TN']=aggregated_cm_test['cm'][0][0]
+        aggregated_cm_test['FP']=aggregated_cm_test['cm'][0][1]
+        aggregated_cm_test['FN']=aggregated_cm_test['cm'][1][0]
+        instances.append(aggregated_cm_test)
+        print(aggregated_cm_test)
 
-    """
+    df = pd.DataFrame(instances)
+    df = df.drop(columns=['split'],inplace=False)
+    df['BACC'] = (df['TPR']+df['TNR'])/2
+    # plot task (veracity) vs acc for each model
+
+    task_vector = ['GTvsOF','TvsOF','GTvsSF','TvsSF']
+    model_vector = ['LogisticRegression','LinearSVC','BernoulliNB']
+    task_labels={'GTvsOF':'Grounded Truth vs Obviously Fake','TvsOF':'LLM Truth vs Obviously Fake','GTvsSF':'Grounded Truth vs Subtly Fake','TvsSF':'LLM Truth vs Subtly Fake'}
+    model_labels={'LogisticRegression':'Logistic Regression','LinearSVC':'Linear SVC','BernoulliNB':'Bernoulli NB'}
+
+    g = sns.catplot(
+        data=df, x="task", y="ACC", hue="model",
+        capsize=.2, palette="YlGnBu_d", errorbar="se",
+        kind="point", height=6, aspect=1,order=task_vector,hue_order=model_vector)
+    g.despine(left=True)
+    g.axes.flat[0].set_title('Task vs Accuracy')
+    g.set_xticklabels([task_labels[x].replace(' vs ','\nvs\n') for x in task_vector],rotation=45)
+    g.set_ylabels('Accuracy')
+    g.set_xlabels('Task')
+    g.set_titles('Model: {col_name}')
+    # add task legend
+    plt.title('Task vs Balanced Accuracy')
+    plt.tight_layout()
+    sns.move_legend(g, "upper right")
+    g.savefig(os.path.join(OUTPUT_PATH,'task_vs_acc.pdf'))
+
+    # Analysis of feature importance
+
+    def get_salient_words(nb_clf, vect, class_ind):
+        """Return salient words for given class
+        Parameters
+        ----------
+        nb_clf : a Naive Bayes classifier (e.g. MultinomialNB, BernoulliNB)
+        vect : CountVectorizer
+        class_ind : int
+        Returns
+        -------
+        list
+            a sorted list of (word, log prob) sorted by log probability in descending order.
+        """
+
+        words = vect.get_feature_names_out()
+        zipped = list(zip(words, nb_clf.feature_log_prob_[class_ind]))
+        sorted_zip = sorted(zipped, key=lambda t: t[1], reverse=True)
+
+        return sorted_zip
+    # See the most common top-10 features for each model and task combination across all folds
+    features_dicts = []
+    for model in model_vector:
+        for task in task_vector:
+            features_dict={}
+            features_dict['model']=model
+
+            features_dict['task']=task
+            print(model,task)
+            instance_pattern = 'model-%model%_task-%task%_split-%split%'
+            folder_pattern = os.path.join(INPUT_PATH,instance_pattern).replace('%model%',model).replace('%task%',task).replace('%split%','*')
+            folders=glob.glob(folder_pattern)
+            print(folders)
+            top_features = []
+            for folder_ in folders:
+                for fold in range(11):
+                    with open(os.path.join(folder_,f'model-fold-{fold}.pickle'),'rb') as f:
+                        model_dict = pickle.load(f)
+                    pipeline = model_dict['pipeline']
+                    vectorizer = pipeline.named_steps['vectorizer']
+                    if model in ['LinearSVC','LogisticRegression']:
+                        clf = pipeline.named_steps['clf']
+                        feature_names = np.array(vectorizer.get_feature_names_out())
+                        coef = clf.coef_.ravel()
+                        top_positive_coefficients = np.argsort(coef)[-10:]
+                        top_negative_coefficients = np.argsort(coef)[:10]
+                        #top_coefficients = np.hstack([top_negative_coefficients, top_positive_coefficients])
+                        #top_features.extend(list(feature_names[top_coefficients]))
+                        top_features.extend(list(feature_names[top_negative_coefficients]))
+                    elif model == 'BernoulliNB':
+                        clf = pipeline.named_steps['clf']
+                        feature_names = np.array(vectorizer.get_feature_names_out())
+                        negative=[x[0] for x in get_salient_words(clf,vectorizer,0)[:10]]
+                        positive=[x[0] for x in get_salient_words(clf,vectorizer,1)[:10]]
+                        # obtain the top 10 features for the negative class that are not in the top 10 features for the positive class
+                        top_features.extend([x for x in negative if x not in positive])
+                        #top_features.extend([x[0] for x in get_salient_words(clf,vectorizer,1)[:10]])
+            features_dict['features']=top_features
+            features_dicts.append(features_dict)
+    df_features = pd.DataFrame(features_dicts)
+    df_features['features_unique'] = df_features['features'].apply(lambda x: np.unique(x,return_counts=True))
+    df_features['features_unique'] = df_features['features_unique'].apply(lambda x: {k:v for k,v in zip(x[0],x[1])})
+    df_features['features_unique'] = df_features['features_unique'].apply(lambda x: {k:v for k,v in sorted(x.items(), key=lambda item: item[1],reverse=True)})
+
+    for i,row in df_features.iterrows():
+        print(row['model'],row['task'])
+        print(row['features_unique'])
+    
+    # make a table of task vs model where each cell is the top 10 features of the combination
+    df_features = df_features.drop(columns=['features'],inplace=False)
+    df_features['task']=df_features['task'].apply(lambda x: task_labels[x])
+    df_features['model']=df_features['model'].apply(lambda x: model_labels[x])
+    df_features_ = df_features.pivot(index='task',columns='model',values='features_unique')
+    df_features_.to_csv(os.path.join(OUTPUT_PATH,'features_table_dict.csv'))
+    df_features_.map(lambda x: ', '.join(x.keys())).to_csv(os.path.join(OUTPUT_PATH,'features_table_list.csv'))
+    """ 
     clf = LogisticRegression(random_state=0).fit(X_train, y_train)
     y_pred = clf.predict(X_test)
     accuracy_score(y_test, y_pred)
