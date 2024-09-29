@@ -1,0 +1,43 @@
+{
+    "LogisticRegression": {
+        "best_params": {
+            "clf__C": 1,
+            "clf__class_weight": {
+                "0": 1,
+                "1": 1
+            },
+            "clf__fit_intercept": true,
+            "clf__penalty": "l2",
+            "clf__solver": "saga",
+            "clf__tol": 0.001
+        }
+    },
+    "LinearSVC": {
+        "best_params": {
+            "clf__C": 1,
+            "clf__class_weight": {
+                "0": 1,
+                "1": 1
+            },
+            "clf__dual": "auto",
+            "clf__fit_intercept": true,
+            "clf__intercept_scaling": 1,
+            "clf__loss": "squared_hinge",
+            "clf__max_iter": 100,
+            "clf__multi_class": "ovr",
+            "clf__penalty": "l2",
+            "clf__random_state": 42,
+            "clf__tol": 0.0001,
+            "clf__verbose": 0
+        }
+    },
+    "BernoulliNB": {
+        "best_params": {
+            "clf__alpha": 0.5,
+            "clf__binarize": 0.0,
+            "clf__class_prior": null,
+            "clf__fit_prior": true,
+            "clf__force_alpha": true
+        }
+    }
+}

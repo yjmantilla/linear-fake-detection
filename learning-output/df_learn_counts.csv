@@ -1,0 +1,13 @@
+city,grounded truth,obviously fake,subtly fake,true,total_by_city
+athens,272,293,303,267,1135
+barcelona,128,140,142,124,534
+brasilia,84,82,85,82,333
+buenos_aires,398,460,486,384,1728
+caracas,210,228,257,205,900
+kyoto,158,165,173,156,652
+los_angeles,682,752,810,671,2915
+melbourne,157,164,179,150,650
+mexico_city,521,566,601,510,2198
+montreal,297,310,316,277,1200
+warsaw,156,170,160,154,640
+total_by_veracity,3063,3330,3512,2980,12885

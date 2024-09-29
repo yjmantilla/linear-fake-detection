@@ -1,0 +1,29 @@
+{
+    "LogisticRegression": {
+        "best_params": {
+            "prep__kw_args": {
+                "final_step": "lemmatization"
+            },
+            "vectorizer__norm": null,
+            "vectorizer__use_idf": false
+        }
+    },
+    "LinearSVC": {
+        "best_params": {
+            "prep__kw_args": {
+                "final_step": "lemmatization"
+            },
+            "vectorizer__norm": "l2",
+            "vectorizer__use_idf": true
+        }
+    },
+    "BernoulliNB": {
+        "best_params": {
+            "prep__kw_args": {
+                "final_step": "lemmatization"
+            },
+            "vectorizer__norm": "l1",
+            "vectorizer__use_idf": true
+        }
+    }
+}
