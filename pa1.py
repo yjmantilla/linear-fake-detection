@@ -1,4 +1,4 @@
-MODE = 'results'
+MODE = 'results' # 'generate' or 'learn' or 'results'
 
 
 ## Logging and utility functions
@@ -503,10 +503,17 @@ if MODE=='learn':
     def prep_sentences(list_of_sentences, final_step='lemmatization'):
         return [prep_sentence(sentence, final_step) for sentence in list_of_sentences]
 
+    # Get the counts of the veracities by city for the df_other dataset
+    df_others_counts=df_others.groupby(['city','veracity']).size().unstack().fillna(0).astype(int).assign(total_by_city=lambda x: x.sum(axis=1))
+    # sum by column
+    df_others_counts.loc['total_by_veracity']=df_others_counts.sum()
+    df_others_counts.to_csv(os.path.join(OUTPUT_PATH,'df_others_counts.csv'))
+
     ## Preprocessing tuning for the pipeline using df_others
 
     # Encoding the labels from boolean to 1 and 0
     df_others['label']=df_others['veracity'].apply(lambda x: 1 if x=='facts' else 0)
+
 
     # Splitting the holdout data (df_others, that came from other students) into two sets
     # 1 set will be used to experiment on the preprocessing (X_prep,y_prep)
@@ -687,7 +694,14 @@ if MODE=='learn':
     for city in df_learn['city'].unique():
         print(city)
         print(df_learn[df_learn['city']==city]['veracity'].value_counts())
+    
+    # Make a table with this information
+    df_learn_counts=df_learn.groupby(['city','veracity']).size().unstack().fillna(0).astype(int).assign(total_by_city=lambda x: x.sum(axis=1))
+    # sum by column
+    df_learn_counts.loc['total_by_veracity']=df_learn_counts.sum()
+    df_learn_counts.to_csv(os.path.join(OUTPUT_PATH,'df_learn_counts.csv'))
 
+    # Iterate over the tasks, models, and the split types (i wanted to explore more splits modes but time ran out)
     for task in task_dict.keys():
 
         for split_type in ['gkf']:
@@ -703,6 +717,8 @@ if MODE=='learn':
 
                 model_root = os.path.join(OUTPUT_PATH,f"model-{model}_task-{task}_split-{split_type}")
                 os.makedirs(model_root,exist_ok=True)
+
+                ## Load best preprocessing and hyperparameters
 
                 best_prep = best_preps[model]['best_params']
                 best_h = {k.replace('clf__',''):v for k,v in best_hyper[model]['best_params'].items() if 'clf' in k}
@@ -722,7 +738,9 @@ if MODE=='learn':
                     
                     if not os.path.exists(os.path.join(model_root,'aggregated_cm_test.json')):
 
-                        aggregated_cm_test = np.zeros((2,2))
+                        aggregated_cm_test = np.zeros((2,2)) # to store the aggregated confusion matrix, may be useful for analysis
+
+                        # Do Group K Fold where the groups are the cities, it is leave one out
                         for i, (train_index, test_index) in enumerate(gkf.split(this_df.index, this_df.index, this_df['city'])):
                             print(f"Fold {i}:")
                             #print(f"  Train: index={train_index}")
@@ -750,7 +768,7 @@ if MODE=='learn':
 
                             aggregated_cm_test+=cm_test
 
-                        # Calculate the aggregated confusion matrix
+                        # Calculate the aggregated confusion matrix and save it
                         final_metrics=get_metrics(aggregated_cm_test.astype(int).ravel())
                         final_metrics['cm']=aggregated_cm_test.astype(int).tolist()
                         print('Aggregated Test:',final_metrics)
@@ -765,11 +783,11 @@ if MODE=='results':
     from itertools import product
     import numpy as np
 
-    OUTPUT_PATH = 'results-output'
-    INPUT_PATH = 'learning-output'
+    OUTPUT_PATH = 'results-output2'
+    INPUT_PATH = 'learning-output2'
     os.makedirs(OUTPUT_PATH,exist_ok=True)
 
-    # Analyze preprocessing results
+    # Analyze preprocessing results, we are going to load them and make plots
 
     # These definitions are just to avoid pickling problems
     prep_sentences = lambda x:x
@@ -797,6 +815,7 @@ if MODE=='results':
         'param_vectorizer__norm':'Norm '
     }
 
+    # do boxplots for each model and preprocessing parameter explored
     fig, axes = plt.subplots(3, 3, figsize=(6, 6)) 
     combs=list(product(best_preps.keys(),param_title.keys()))
     for iax, comb in zip(enumerate(axes.flatten()), combs):
@@ -818,7 +837,7 @@ if MODE=='results':
     plt.tight_layout()
     fig.savefig(os.path.join(OUTPUT_PATH,'preprocessing_results_boxplot.pdf'))
 
-
+    # Save the best preprocessing per model to query later for the report
     best_preps = pickle.load(open(os.path.join(INPUT_PATH,'best_preps.pickle'),'rb'))
     best_prep_dict = {}
     for model in best_preps.keys():
@@ -827,7 +846,8 @@ if MODE=='results':
 
     save_dict(os.path.join(OUTPUT_PATH,'best_preps_per_model.json'),best_prep_dict,mode='json')
 
-    # Do the same for hyperparameters
+    # Do the same for hyperparameters, will skip the plot because it is more complex
+    # Just going to save the best hyperparameters per model to query later for the report
     best_hyper = pickle.load(open(os.path.join(INPUT_PATH,'best_hyper.pickle'),'rb'))
 
     best_hyper_dict = {}
@@ -837,7 +857,7 @@ if MODE=='results':
     
     save_dict(os.path.join(OUTPUT_PATH,'best_hyper_per_model.json'),best_hyper_dict,mode='json')
 
-    ## Analyze tasks results
+    ## Analyze tasks results, we are going to get the results from the models but for each of the folds and then do a distribution plot
 
     instance_pattern = 'model-%model%_task-%task%_split-%split%'
     folder_pattern = os.path.join(INPUT_PATH,instance_pattern).replace('%model%','*').replace('%task%','*').replace('%split%','*')
@@ -870,14 +890,18 @@ if MODE=='results':
 
     df = pd.DataFrame(instances)
     df = df.drop(columns=['split'],inplace=False)
-    df['BACC'] = (df['TPR']+df['TNR'])/2
+    df['BACC'] = (df['TPR']+df['TNR'])/2 # just a test... not used in the end
+
     # plot task (veracity) vs acc for each model
 
+    # these definitions are to make the plotting easier and better formatted for the final report
     task_vector = ['GTvsOF','TvsOF','GTvsSF','TvsSF']
     model_vector = ['LogisticRegression','LinearSVC','BernoulliNB']
-    task_labels={'GTvsOF':'Grounded Truth vs Obviously Fake','TvsOF':'LLM Truth vs Obviously Fake','GTvsSF':'Grounded Truth vs Subtly Fake','TvsSF':'LLM Truth vs Subtly Fake'}
+    task_labels={'GTvsOF':'Grounded Truth vs Obvious Fake','TvsOF':'Confabulated Truth vs Obvious Fake','GTvsSF':'Grounded Truth vs Subtle Fake','TvsSF':'Confabulated Truth vs Subtle Fake'}
     model_labels={'LogisticRegression':'Logistic Regression','LinearSVC':'Linear SVC','BernoulliNB':'Bernoulli NB'}
 
+    # Do the categorial plot for the different tasks and models, each model will be a line but with the distribution of the accuracy
+    # categories (tasks) will be the x axis
     g = sns.catplot(
         data=df, x="task", y='ACC_distribution', hue="model",
         capsize=.2, palette="YlGnBu_d", errorbar="se",
@@ -889,13 +913,15 @@ if MODE=='results':
     g.set_xlabels('Task')
     g.set_titles('Model: {col_name}')
     # add task legend
-    plt.title('Task vs Balanced Accuracy')
+    plt.title('Task vs Accuracy')
     plt.tight_layout()
     sns.move_legend(g, "upper right")
     g.savefig(os.path.join(OUTPUT_PATH,'task_vs_acc.pdf'))
 
     # Analysis of feature importance
+    # i did this but it is not used in the final report, too much space...
 
+    ## this function is for the BernoulliNB model, i got it from stackoverflow and it sort of made sense to me
     def get_salient_words(nb_clf, vect, class_ind):
         """Return salient words for given class
         Parameters
@@ -916,7 +942,10 @@ if MODE=='results':
         sorted_zip = sorted(zipped, key=lambda t: t[1], reverse=True)
 
         return sorted_zip
+
     # See the most common top-10 features for each model and task combination across all folds
+    # that is we will grab the 10 highest features for the negative class (fake) across the folds
+    # and see which are the most common ones (i.e. the ones that appear the most across the folds)
     features_dicts = []
     for model in model_vector:
         for task in task_vector:
@@ -945,7 +974,7 @@ if MODE=='results':
                         #top_coefficients = np.hstack([top_negative_coefficients, top_positive_coefficients])
                         #top_features.extend(list(feature_names[top_coefficients]))
                         top_features.extend(list(feature_names[top_negative_coefficients]))
-                    elif model == 'BernoulliNB':
+                    elif model == 'BernoulliNB': # had to do this because the BernoulliNB does not have coef_ attribute
                         clf = pipeline.named_steps['clf']
                         feature_names = np.array(vectorizer.get_feature_names_out())
                         negative=[x[0] for x in get_salient_words(clf,vectorizer,0)[:10]]
@@ -956,6 +985,8 @@ if MODE=='results':
             features_dict['features']=top_features
             features_dicts.append(features_dict)
     df_features = pd.DataFrame(features_dicts)
+
+    # now do a list of unique features (unigrams) per task and model
     df_features['features_unique'] = df_features['features'].apply(lambda x: np.unique(x,return_counts=True))
     df_features['features_unique'] = df_features['features_unique'].apply(lambda x: {k:v for k,v in zip(x[0],x[1])})
     df_features['features_unique'] = df_features['features_unique'].apply(lambda x: {k:v for k,v in sorted(x.items(), key=lambda item: item[1],reverse=True)})
